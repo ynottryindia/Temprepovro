@@ -42,3 +42,91 @@ for each (var wf in allWorkflows) {
                 var script = item.getScript();
                 var actionMatches = script.match(/[a-zA-Z_][\w\.]+\([^\)]*\)/g);
                 if (actionMatches) {
+                    for each (var match in actionMatches) {
+                        var actionName = match.split('(')[0].trim();
+                        actionsUsed[actionName] = true;
+                    }
+                }
+            } catch(e) {
+                System.warn("Cannot parse script in task: " + item.name);
+            }
+        }
+
+        // Check sub-workflows
+        if (item.type == "workflow" && item.workflow) {
+            workflowsUsed[item.workflow.name] = item.workflow.id;
+        }
+
+        // Check configurations
+        if (item.type == "configurationElement" && item.configurationElement) {
+            configurationsUsed[item.configurationElement.name] = true;
+        }
+
+        // Check resources (e.g., resource elements)
+        if (item.type == "resourceElement" && item.resourceElement) {
+            resourcesUsed[item.resourceElement.name] = true;
+        }
+    }
+
+    // Add actions used to the report
+    fullReport += "**🛠 Actions Used:**\n";
+    if (Object.keys(actionsUsed).length > 0) {
+        for (var act in actionsUsed) {
+            fullReport += "- `" + act + "`\n";
+        }
+    } else {
+        fullReport += "_None_\n";
+    }
+    fullReport += "\n";
+
+    // Add sub-workflows used to the report
+    fullReport += "**🔗 Sub-workflows Called:**\n";
+    if (Object.keys(workflowsUsed).length > 0) {
+        for (var subWf in workflowsUsed) {
+            fullReport += "- " + subWf + " (`" + workflowsUsed[subWf] + "`)\n";
+        }
+    } else {
+        fullReport += "_None_\n";
+    }
+    fullReport += "\n";
+
+    // Add configurations used to the report
+    fullReport += "**⚙️ Configurations Referenced:**\n";
+    if (Object.keys(configurationsUsed).length > 0) {
+        for (var conf in configurationsUsed) {
+            fullReport += "- " + conf + "\n";
+        }
+    } else {
+        fullReport += "_None_\n";
+    }
+    fullReport += "\n";
+
+    // Add resources used to the report
+    fullReport += "**📦 Resources Referenced:**\n";
+    if (Object.keys(resourcesUsed).length > 0) {
+        for (var res in resourcesUsed) {
+            fullReport += "- " + res + "\n";
+        }
+    } else {
+        fullReport += "_None_\n";
+    }
+    fullReport += "\n";
+
+    // Add workflows that invoke this workflow
+    var usages = findWorkflowUsages(wf.id, allWorkflows);
+    fullReport += "**🚦 Invoked by Workflows:**\n";
+    if (usages.length > 0) {
+        for each (var usageWf in usages) {
+            fullReport += "- " + usageWf + "\n";
+        }
+    } else {
+        fullReport += "_None_\n";
+    }
+    fullReport += "\n---\n\n";
+}
+
+// Output final report
+System.log(fullReport);
+
+// Optionally set as workflow output
+// workflowReportOutput = fullReport;
