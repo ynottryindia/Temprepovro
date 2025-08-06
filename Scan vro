@@ -1,0 +1,80 @@
+// Secure regex pattern to detect common password exposures or sensitive strings
+var passwordPatterns = [
+    /password\s*=\s*["'][^"']+["']/gi,
+    /passwd\s*=\s*["'][^"']+["']/gi,
+    /pwd\s*=\s*["'][^"']+["']/gi,
+    /secret\s*=\s*["'][^"']+["']/gi,
+    /token\s*=\s*["'][^"']+["']/gi
+];
+
+// Array to store audit results
+var auditResults = [];
+
+// Retrieve all workflows
+var allWorkflows = Server.findAllForType("Workflow");
+
+// Iterate each workflow
+for each (var wf in allWorkflows) {
+    var wfName = wf.name;
+    var scriptContent = "";
+
+    // Check each workflow item for scriptable tasks
+    var items = wf.workflowItems;
+    for each (var item in items) {
+        if (item.type === "task") {
+            try {
+                scriptContent = item.getScript();
+            } catch (e) {
+                System.log("Cannot retrieve script for item: " + item.name);
+                continue;
+            }
+
+            var findings = [];
+
+            // Apply each regex pattern to detect exposures
+            for each (var pattern in passwordPatterns) {
+                var matches = scriptContent.match(pattern);
+                if (matches && matches.length > 0) {
+                    findings.push({
+                        taskName: item.name,
+                        pattern: pattern.toString(),
+                        occurrences: matches.length
+                    });
+                }
+            }
+
+            // If findings exist, add them to the auditResults
+            if (findings.length > 0) {
+                auditResults.push({
+                    workflow: wfName,
+                    task: item.name,
+                    issues: findings
+                });
+            }
+        }
+    }
+}
+
+// Prepare a readable report
+var report = "Audit Report - Password Exposure Scan\n";
+report += "Generated on: " + new Date() + "\n\n";
+
+if (auditResults.length === 0) {
+    report += "✅ No exposed passwords or sensitive strings were found in any workflows.\n";
+} else {
+    for each (var result in auditResults) {
+        report += "⚠️ Workflow: " + result.workflow + "\n";
+        report += "  ↳ Task: " + result.task + "\n";
+        for each (var issue in result.issues) {
+            report += "    - Pattern: " + issue.pattern + "\n";
+            report += "    - Occurrences: " + issue.occurrences + "\n";
+        }
+        report += "\n";
+    }
+}
+
+// Output the report securely
+System.log(report);
+
+// You could also set this as an output parameter if needed
+// e.g., workflowOutputReport = report;
