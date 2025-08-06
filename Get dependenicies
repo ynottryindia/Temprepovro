@@ -1,0 +1,44 @@
+// Function to find workflows invoking a given workflow
+function findWorkflowUsages(targetWorkflowId, allWorkflows) {
+    var usages = [];
+    for each (var wf in allWorkflows) {
+        var items = wf.workflowItems;
+        for each (var item in items) {
+            if (item.type == "workflow" && item.workflow && item.workflow.id == targetWorkflowId) {
+                usages.push(wf.name);
+            }
+        }
+    }
+    return usages;
+}
+
+// Retrieve all workflows from vRO
+var allWorkflows = Server.findAllForType("Workflow");
+
+// Initialize report
+var fullReport = "# Workflow Dependencies Report\n";
+fullReport += "_Generated on: " + new Date() + "_\n\n";
+
+// Iterate over each workflow
+for each (var wf in allWorkflows) {
+
+    fullReport += "## 📗 Workflow: " + wf.name + "\n";
+    fullReport += "- **ID**: `" + wf.id + "`\n";
+    fullReport += "- **Version**: `" + wf.version + "`\n\n";
+
+    // Track dependencies
+    var actionsUsed = {};
+    var workflowsUsed = {};
+    var configurationsUsed = {};
+    var resourcesUsed = {};
+
+    var items = wf.workflowItems;
+
+    // Scan each workflow item
+    for each (var item in items) {
+        // Check for actions
+        if (item.type == "task") {
+            try {
+                var script = item.getScript();
+                var actionMatches = script.match(/[a-zA-Z_][\w\.]+\([^\)]*\)/g);
+                if (actionMatches) {
