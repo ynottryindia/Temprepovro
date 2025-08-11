@@ -1,27 +1,29 @@
-// This script can be run in a Scriptable Task in a vRealize Orchestrator (Aria Orchestrator) workflow.
-// It lists all workflows with their name, ID, dependencies (referenced actions and sub-workflows), and whether they store any credentials (SecureString attributes or inputs).
+// This script lists all workflows in vRealize Orchestrator, including their name, ID, dependencies, and whether they store credentials.
+// Run this in a Scriptable Task within a vRO workflow.
 
 var workflows = Server.findAllForType("Workflow");
 
 for each (var wf in workflows) {
     System.log("Workflow Name: " + wf.name);
     System.log("Workflow ID: " + wf.id);
-    
+
     // Check for credentials (SecureString in inputs or attributes)
     var hasCredentials = false;
-    
+
     // Check inputs
-    var inputs = wf.inputs; // Array of SDKParameter
-    for each (var input in inputs) {
-        if (input.type === "SecureString") {
-            hasCredentials = true;
-            break;
+    var inputs = wf.getInputParameters(); // Get workflow inputs
+    if (inputs) {
+        for each (var input in inputs) {
+            if (input.type === "SecureString") {
+                hasCredentials = true;
+                break;
+            }
         }
     }
-    
-    if (!hasCredentials) {
-        // Check attributes
-        var attributes = wf.attributes; // Array of SDKParameter
+
+    // Check attributes
+    var attributes = wf.getAttributes(); // Get workflow attributes
+    if (attributes && !hasCredentials) {
         for each (var attr in attributes) {
             if (attr.type === "SecureString") {
                 hasCredentials = true;
@@ -29,32 +31,35 @@ for each (var wf in workflows) {
             }
         }
     }
-    
+
     System.log("Has Credentials: " + (hasCredentials ? "Yes" : "No"));
-    
-    // Get dependencies (referenced actions and sub-workflows)
+
+    // Get dependencies (actions and sub-workflows)
     var dependencies = [];
-    var schemaElements = wf.schema.elements;
-    
-    for each (var elem in schemaElements) {
-        var item = elem.item;
-        
+    var workflowItems = wf.getAllItems(); // Get all workflow items (schema elements)
+
+    for each (var item in workflowItems) {
         // Check for action calls
-        if (item && item.constructor.name === "ActionItem") { // or use instanceof if package known
-            dependencies.push("Action: " + item.action.name);
+        if (item.type === "ACTION") {
+            var action = item.getAction();
+            if (action) {
+                dependencies.push("Action: " + action.name);
+            }
         }
-        
         // Check for nested workflows
-        if (item && item.constructor.name === "WorkflowItem") {
-            dependencies.push("Workflow: " + item.workflow.name);
+        else if (item.type === "WORKFLOW") {
+            var subWorkflow = item.getWorkflow();
+            if (subWorkflow) {
+                dependencies.push("Workflow: " + subWorkflow.name);
+            }
         }
     }
-    
+
     if (dependencies.length > 0) {
         System.log("Dependencies: " + dependencies.join(", "));
     } else {
         System.log("Dependencies: None");
     }
-    
+
     System.log("-----------------------------------");
 }
