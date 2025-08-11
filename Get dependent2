@@ -1,0 +1,261 @@
+//
+// Security & Dependency Audit – vRO 7.x / 8.x compatible JavaScript
+// Creates a JSON + CSV report of potential secret exposure + dependency/usage graph (if deep scan).
+//
+// Inputs:  doDeepScan:boolean, maxWorkflows:number (optional)
+// Outputs: reportCsv:string, reportJson:string
+//
+
+// ===== Utilities =====
+function safe(v) {
+  if (v === null || v === undefined) return "";
+  if (v instanceof Array) return v.join(" | ");
+  return String(v);
+}
+
+function csvEscape(s) {
+  if (s === null || s === undefined) return "";
+  var str = String(s);
+  if (/[",\n]/.test(str)) return '"' + str.replace(/"/g, '""') + '"';
+  return str;
+}
+
+function toCsv(rows) {
+  return rows.map(function(r){ return r.map(csvEscape).join(","); }).join("\n");
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+// Basic secret heuristics for names & values
+var NAME_SECRET_RE = /(pass(word)?|pwd|secret|token|apikey|api_key|bearer|cred|auth|private|clientsecret|client_secret|ssh(key)?)/i;
+// If we parse script text (deep scan), look for ugly things:
+var SCRIPT_SECRET_RE = new RegExp([
+  // Things like "password = 'abc'", "token: 'x'", bearers, base64 basic auth, URLs with creds
+  "(?:(pass(word)?|token|secret|apikey|api_key|bearer)\\s*[:=]\\s*['\\\"][^'\\\"]{4,}['\\\"])",
+  "|(Authorization\\s*[:=]\\s*['\\\"][Bb]earer\\s+[^'\\\"]+['\\\"])",
+  "|(Basic\\s+[A-Za-z0-9+/=]{12,})",
+  "|([A-Za-z]+://[^\\s:@/]+:[^\\s@/]+@[^\\s]+)", // user:pass@host
+].join(""), "g");
+
+// ===== Deep-scan helpers (vRO REST API) =====
+// Requires a RESTHost named exactly "vRO Self API" pointing to your vRO URL with credentials that can read workflows.
+// For vRO 8.x the base is typically https://<vro-fqdn>/vco/api
+// Endpoints used:
+//   GET /workflows/{id}?expand=relations
+//   GET /workflows/{id}/content       (XML; contains schema + script bodies)
+function getSelfApiHost() {
+  try {
+    var hosts = RESTHostManager.getAllRestHosts();
+    for (var i=0;i<hosts.length;i++) {
+      if (hosts[i].name === "vRO Self API") return hosts[i];
+    }
+  } catch (e) {}
+  return null;
+}
+
+function restGet(restHost, path) {
+  var req = restHost.createRequest("GET", path, null);
+  req.setHeader("Accept", "application/json");
+  var resp = req.execute();
+  if (resp.statusCode < 200 || resp.statusCode >= 300) {
+    throw "REST GET " + path + " failed: " + resp.statusCode + " " + resp.contentAsString;
+  }
+  return JSON.parse(resp.contentAsString);
+}
+
+function restGetXml(restHost, path) {
+  var req = restHost.createRequest("GET", path, null);
+  req.setHeader("Accept", "application/xml");
+  var resp = req.execute();
+  if (resp.statusCode < 200 || resp.statusCode >= 300) {
+    throw "REST GET " + path + " failed: " + resp.statusCode + " " + resp.contentAsString;
+  }
+  return resp.contentAsString;
+}
+
+// Very light XML script extraction to avoid a full XML parser in vRO JS.
+// Looks for <script> ... <![CDATA[ ... ]]> ... </script>
+function extractScriptsFromWorkflowXml(xmlText) {
+  var scripts = [];
+  if (!xmlText) return scripts;
+  // normalize
+  var text = String(xmlText);
+  // Capture CDATA bodies inside <script>...</script>
+  var re = /<script[^>]*>([\s\S]*?)<\/script>/gi, m;
+  while ((m = re.exec(text)) !== null) {
+    var body = m[1] || "";
+    var cdataMatch = /<!\[CDATA\[([\s\S]*?)\]\]>/.exec(body);
+    scripts.push((cdataMatch && cdataMatch[1]) ? cdataMatch[1] : body);
+  }
+  return scripts;
+}
+
+// ===== Main scan =====
+var all = Server.getAllWorkflows(); // Array of Workflow objects
+var limit = (typeof maxWorkflows === "number" && maxWorkflows > 0) ? maxWorkflows : all.length;
+
+var deepHost = (doDeepScan === true) ? getSelfApiHost() : null;
+if (doDeepScan && !deepHost) {
+  System.warn("doDeepScan=true but REST host 'vRO Self API' not found. Running shallow scan.");
+}
+
+var report = []; // array of objects for JSON
+var csvRows = [];
+
+// CSV header
+csvRows.push([
+  "scan_timestamp",
+  "wf_name",
+  "wf_id",
+  "version",
+  "category_path",
+  "finding_type",               // ATTR_INPUT | ATTR_ATTRIBUTE | SCRIPT | PRESENTATION | DEPENDENCY | USAGE
+  "field_name_or_location",
+  "detail"
+]);
+
+for (var i=0; i<limit; i++) {
+  var wf = all[i];
+  var rowBase = {
+    scanTimestamp: nowIso(),
+    name: safe(wf.name),
+    id: safe(wf.id),
+    version: safe(wf.version),
+    categoryPath: safe(wf.categoryPath)
+  };
+  var wfFindings = {
+    name: wf.name,
+    id: wf.id,
+    version: wf.version,
+    categoryPath: wf.categoryPath,
+    findings: [],
+    dependencies: [],
+    usedBy: []
+  };
+
+  // --- Shallow scan: inputs & attributes
+  // Inputs
+  try {
+    var inParams = wf.getInputParameters ? wf.getInputParameters() : (wf.inParameters || []);
+    for (var ip=0; ip<inParams.length; ip++) {
+      var p = inParams[ip];
+      var pName = safe(p.name);
+      var pType = safe(p.type);
+      var pDefault = (p.defaultValue !== null && p.defaultValue !== undefined) ? String(p.defaultValue) : "";
+      var looksSensitive = NAME_SECRET_RE.test(pName);
+      var defaultLooksSecret = pDefault && (NAME_SECRET_RE.test(pName) || pDefault.length >= 4); // keep it broad
+
+      if (looksSensitive && pType.toLowerCase() === "string") {
+        wfFindings.findings.push({type:"ATTR_INPUT", field:pName, detail:"Input name suggests secret; use SecureString"});
+        csvRows.push([rowBase.scanTimestamp,rowBase.name,rowBase.id,rowBase.version,rowBase.categoryPath,"ATTR_INPUT",pName,"Name suggests secret; use SecureString"]);
+      }
+      if (defaultLooksSecret && pType.toLowerCase() !== "securestring" && pDefault) {
+        wfFindings.findings.push({type:"ATTR_INPUT", field:pName, detail:"Default value present; risk of exposure in export/history"});
+        csvRows.push([rowBase.scanTimestamp,rowBase.name,rowBase.id,rowBase.version,rowBase.categoryPath,"ATTR_INPUT",pName,"Default value present; risk of exposure"]);
+      }
+    }
+  } catch (e1) {
+    System.warn("Input scan error for " + wf.name + ": " + e1);
+  }
+
+  // Attributes
+  try {
+    var attrs = wf.getAttributes ? wf.getAttributes() : (wf.attributes || []);
+    for (var a=0; a<attrs.length; a++) {
+      var at = attrs[a];
+      var aName = safe(at.name);
+      var aType = safe(at.type);
+      var aVal = (at.value !== null && at.value !== undefined) ? String(at.value) : "";
+      var nameSensitive = NAME_SECRET_RE.test(aName);
+
+      if (nameSensitive && aType.toLowerCase() === "string") {
+        wfFindings.findings.push({type:"ATTR_ATTRIBUTE", field:aName, detail:"Attribute looks like a secret; convert to SecureString"});
+        csvRows.push([rowBase.scanTimestamp,rowBase.name,rowBase.id,rowBase.version,rowBase.categoryPath,"ATTR_ATTRIBUTE",aName,"Attribute looks secret; use SecureString"]);
+      }
+      if (aVal && aType.toLowerCase() !== "securestring" && NAME_SECRET_RE.test(aName)) {
+        wfFindings.findings.push({type:"ATTR_ATTRIBUTE", field:aName, detail:"Hardcoded value on likely secret attribute"});
+        csvRows.push([rowBase.scanTimestamp,rowBase.name,rowBase.id,rowBase.version,rowBase.categoryPath,"ATTR_ATTRIBUTE",aName,"Hardcoded value present"]);
+      }
+    }
+  } catch (e2) {
+    System.warn("Attribute scan error for " + wf.name + ": " + e2);
+  }
+
+  // --- Deep scan (if REST host present): scripts + dependencies + reverse usage
+  if (deepHost) {
+    try {
+      // Relations: gives dependencies (actions, workflows, configurations) and who uses this workflow
+      var rel = restGet(deepHost, "/workflows/" + encodeURIComponent(wf.id) + "?expand=relations");
+      // dependencies
+      if (rel.relations && rel.relations.link) {
+        for (var r=0; r<rel.relations.link.length; r++) {
+          var lk = rel.relations.link[r];
+          // lk.rel examples: "workflow", "scriptAction", "configurationElement", "resourceElement"
+          if (lk.rel && lk.rel.indexOf("used-") === 0) {
+            // skip if it's a generic rel
+          }
+          // Treat all outbound links as dependencies
+          if (lk.title && lk.rel) {
+            wfFindings.dependencies.push({type: lk.rel, title: lk.title, href: lk.href});
+            csvRows.push([rowBase.scanTimestamp,rowBase.name,rowBase.id,rowBase.version,rowBase.categoryPath,"DEPENDENCY",safe(lk.title),safe(lk.rel)]);
+          }
+        }
+      }
+
+      // reverse usage (who calls me) – many deployments expose it under relations as "used-by" or separate rels
+      if (rel["used-by"] && rel["used-by"].link) {
+        for (var ub=0; ub<rel["used-by"].link.length; ub++) {
+          var u = rel["used-by"].link[ub];
+          wfFindings.usedBy.push({title:u.title, href:u.href});
+          csvRows.push([rowBase.scanTimestamp,rowBase.name,rowBase.id,rowBase.version,rowBase.categoryPath,"USAGE",safe(u.title),"used-by"]);
+        }
+      }
+
+      // Content: XML -> parse scripts
+      var xml = restGetXml(deepHost, "/workflows/" + encodeURIComponent(wf.id) + "/content");
+      var scripts = extractScriptsFromWorkflowXml(xml);
+
+      // Script checks
+      for (var s=0; s<scripts.length; s++) {
+        var script = scripts[s] || "";
+        var hits = script.match(SCRIPT_SECRET_RE);
+        if (hits && hits.length) {
+          wfFindings.findings.push({type:"SCRIPT", field:"ScriptableTask#" + (s+1), detail:"Possible secret literals: " + hits.slice(0,5).join(" | ")});
+          csvRows.push([rowBase.scanTimestamp,rowBase.name,rowBase.id,rowBase.version,rowBase.categoryPath,"SCRIPT","ScriptableTask#"+(s+1),"Secret-like literals detected"]);
+        }
+
+        // Also look for non-SecureString usage patterns in System.getModule calls passing string literals for auth
+        var modCalls = script.match(/System\.getModule\(["'][^"']+["']\)\.[A-Za-z0-9_]+\(([\s\S]*?)\)/g);
+        if (modCalls) {
+          for (var mc=0; mc<modCalls.length; mc++) {
+            if (/"[^"]{4,}"/.test(modCalls[mc]) && NAME_SECRET_RE.test(modCalls[mc])) {
+              wfFindings.findings.push({type:"SCRIPT", field:"ScriptableTask#" + (s+1), detail:"Module call with string literal that looks sensitive"});
+              csvRows.push([rowBase.scanTimestamp,rowBase.name,rowBase.id,rowBase.version,rowBase.categoryPath,"SCRIPT","ScriptableTask#"+(s+1),"Module call with sensitive literal"]);
+            }
+          }
+        }
+      }
+    } catch (eDeep) {
+      System.warn("Deep scan failed for " + wf.name + ": " + eDeep);
+    }
+  }
+
+  report.push(wfFindings);
+}
+
+// Produce outputs
+var header = ["scan_timestamp","wf_name","wf_id","version","category_path","finding_type","field_name_or_location","detail"];
+var csv = toCsv(csvRows);
+var json = JSON.stringify({
+  scannedAt: nowIso(),
+  totalWorkflows: limit,
+  deepScan: !!deepHost,
+  findings: report
+}, null, 2);
+
+reportCsv = csv;
+reportJson = json;
+
+System.log("Security & Dependency Audit complete. Workflows scanned: " + limit + ", deepScan=" + (!!deepHost));
