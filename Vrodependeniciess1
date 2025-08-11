@@ -1,0 +1,60 @@
+// This script can be run in a Scriptable Task in a vRealize Orchestrator (Aria Orchestrator) workflow.
+// It lists all workflows with their name, ID, dependencies (referenced actions and sub-workflows), and whether they store any credentials (SecureString attributes or inputs).
+
+var workflows = Server.findAllForType("Workflow");
+
+for each (var wf in workflows) {
+    System.log("Workflow Name: " + wf.name);
+    System.log("Workflow ID: " + wf.id);
+    
+    // Check for credentials (SecureString in inputs or attributes)
+    var hasCredentials = false;
+    
+    // Check inputs
+    var inputs = wf.inputs; // Array of SDKParameter
+    for each (var input in inputs) {
+        if (input.type === "SecureString") {
+            hasCredentials = true;
+            break;
+        }
+    }
+    
+    if (!hasCredentials) {
+        // Check attributes
+        var attributes = wf.attributes; // Array of SDKParameter
+        for each (var attr in attributes) {
+            if (attr.type === "SecureString") {
+                hasCredentials = true;
+                break;
+            }
+        }
+    }
+    
+    System.log("Has Credentials: " + (hasCredentials ? "Yes" : "No"));
+    
+    // Get dependencies (referenced actions and sub-workflows)
+    var dependencies = [];
+    var schemaElements = wf.schema.elements;
+    
+    for each (var elem in schemaElements) {
+        var item = elem.item;
+        
+        // Check for action calls
+        if (item && item.constructor.name === "ActionItem") { // or use instanceof if package known
+            dependencies.push("Action: " + item.action.name);
+        }
+        
+        // Check for nested workflows
+        if (item && item.constructor.name === "WorkflowItem") {
+            dependencies.push("Workflow: " + item.workflow.name);
+        }
+    }
+    
+    if (dependencies.length > 0) {
+        System.log("Dependencies: " + dependencies.join(", "));
+    } else {
+        System.log("Dependencies: None");
+    }
+    
+    System.log("-----------------------------------");
+}
