@@ -1,34 +1,60 @@
-function collectAllWorkflows() {
-    // Primary path
-    try {
-        var root = Server.getRootWorkflowCategory();
-        if (root && root.allWorkflows) return root.allWorkflows;
-    } catch (e) {}
-    // Fallback: walk categories
-    function walk(cat, bag) {
-        try { for each (var wf in cat.workflows) bag.push(wf); } catch (e1) {}
-        try { for each (var sub in cat.subCategories) walk(sub, bag); } catch (e2) {}
-    }
-    var out = [];
-    var r = Server.getRootWorkflowCategory();
-    if (r) walk(r, out);
-    return out;
-}
-
 function csvEscape(s) {
     if (s === null || s === undefined) return "";
     return '"' + String(s).replace(/"/g, '""') + '"';
 }
 
-var all = collectAllWorkflows();
+function safeName(wf) {
+    try { return wf.name || (wf.getName && wf.getName()) || ""; } catch (e) { return ""; }
+}
+function safeId(wf) {
+    try { return wf.id || (wf.getId && wf.getId()) || ""; } catch (e) { return ""; }
+}
+function safeVersion(wf) {
+    try { return wf.version || (wf.getVersion && wf.getVersion()) || ""; } catch (e) { return ""; }
+}
+function safeCategoryPath(wf) {
+    // Prefer direct property/method if present
+    try {
+        var p = wf.categoryPath || (wf.getCategoryPath && wf.getCategoryPath()) || "";
+        if (p) return p;
+    } catch (e) {}
+
+    // Fallback: attempt to build from category chain if available
+    try {
+        var cat = wf.category || (wf.getCategory && wf.getCategory()) || null;
+        var segs = [];
+        var guard = 0;
+        while (cat && guard++ < 50) {
+            var n = "";
+            try { n = cat.displayName || cat.name || (cat.getName && cat.getName()) || ""; } catch (e1) {}
+            if (n) segs.push(n);
+            try { cat = cat.parent || (cat.getParent && cat.getParent()) || null; } catch (e2) { break; }
+        }
+        segs.reverse();
+        return segs.join("/");
+    } catch (e3) {
+        return "";
+    }
+}
+
 var rows = [];
 rows.push(["Workflow Name", "Workflow ID", "Version", "Category Path"].join(","));
-for each (var wf in all) {
-    rows.push([
-        csvEscape(wf.name),
-        csvEscape(wf.id),
-        csvEscape(wf.version),
-        csvEscape(wf.categoryPath)
-    ].join(","));
+
+var all = [];
+try {
+    all = Server.findAllForType("Workflow");   // Works across vRO 7/8+
+} catch (e) {
+    throw "Unable to enumerate workflows via Server.findAllForType('Workflow'): " + e;
 }
+
+System.log("Found " + all.length + " workflows.");
+for each (var wf in all) {
+    var name = safeName(wf);
+    var id = safeId(wf);
+    var ver = safeVersion(wf);
+    var path = safeCategoryPath(wf);
+    System.log(name + " | " + id);
+    rows.push([csvEscape(name), csvEscape(id), csvEscape(ver), csvEscape(path)].join(","));
+}
+
 return rows.join("\n");
