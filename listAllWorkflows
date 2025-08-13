@@ -1,64 +1,34 @@
-/*
- * Module: com.ynottry.audit
- * Action: listAllWorkflows
- * Inputs: none
- * Return type: string (CSV)
- */
-
-function getAllWorkflowsSafe() {
-    // Try the fast path (vRO 7/8 usually supports this)
+function collectAllWorkflows() {
+    // Primary path
     try {
         var root = Server.getRootWorkflowCategory();
         if (root && root.allWorkflows) return root.allWorkflows;
-    } catch (e) {
-        // fall through to recursive approach
+    } catch (e) {}
+    // Fallback: walk categories
+    function walk(cat, bag) {
+        try { for each (var wf in cat.workflows) bag.push(wf); } catch (e1) {}
+        try { for each (var sub in cat.subCategories) walk(sub, bag); } catch (e2) {}
     }
-
-    // Fallback: recursively walk categories
-    function collect(cat, bag) {
-        try {
-            if (cat.workflows) {
-                for each (var wf in cat.workflows) bag.push(wf);
-            }
-        } catch (e1) {}
-        try {
-            if (cat.subCategories) {
-                for each (var sub in cat.subCategories) collect(sub, bag);
-            }
-        } catch (e2) {}
-    }
-
     var out = [];
-    var root2 = Server.getRootWorkflowCategory();
-    if (root2) collect(root2, out);
+    var r = Server.getRootWorkflowCategory();
+    if (r) walk(r, out);
     return out;
 }
 
 function csvEscape(s) {
     if (s === null || s === undefined) return "";
-    s = String(s);
-    // wrap in quotes and escape any embedded quotes
-    return '"' + s.replace(/"/g, '""') + '"';
+    return '"' + String(s).replace(/"/g, '""') + '"';
 }
 
-var all = getAllWorkflowsSafe();
-System.log("Found " + all.length + " workflows.");
-
-var lines = [];
-lines.push(["Workflow Name", "Workflow ID", "Version", "Category Path"].join(","));
-
+var all = collectAllWorkflows();
+var rows = [];
+rows.push(["Workflow Name", "Workflow ID", "Version", "Category Path"].join(","));
 for each (var wf in all) {
-    // Properties are widely available across vRO versions
-    var name = wf.name;
-    var id = wf.id;                         // GUID
-    var ver = (wf.version !== undefined) ? wf.version : "";
-    var path = (wf.categoryPath !== undefined) ? wf.categoryPath : "";
-
-    // Log (optional)
-    System.log(name + " | " + id);
-
-    // CSV row
-    lines.push([csvEscape(name), csvEscape(id), csvEscape(ver), csvEscape(path)].join(","));
+    rows.push([
+        csvEscape(wf.name),
+        csvEscape(wf.id),
+        csvEscape(wf.version),
+        csvEscape(wf.categoryPath)
+    ].join(","));
 }
-
-return lines.join("\n");
+return rows.join("\n");
